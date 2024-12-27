@@ -1,97 +1,102 @@
 from enum import Enum
-from typing import Union, Dict, Optional
-from datetime import datetime
+from typing import List, Optional
+from datetime import date
+import random
+import string
 
+from sqlalchemy import Engine, Table, MetaData, Column, String, Integer, Connection, inspect, insert, text, select
 from pydantic import BaseModel
 
+metadata_obj = MetaData() 
+urls = Table(
+    'urls',
+    metadata_obj,
+    Column('id', Integer, primary_key=True),
+    Column('short_url', String),
+    Column('url', String)
+)
 
-class DogType(str, Enum):
-    terrier = "terrier"
-    bulldog = "bulldog"
-    dalmatian = "dalmatian"
+def create_table(engine:Engine):
+    tables = inspect(engine).get_table_names()
+    if 'urls' not in tables:
+        metadata_obj.create_all(engine)
+    return None
 
-class Dog(BaseModel):
-    name: str
-    pk: int
-    kind: DogType
+class ShortURL(BaseModel):
+    short_url:Optional[str] = None
 
-class Timestamp(BaseModel):
-    id: int
-    timestamp: int
-
-class PostDB(BaseModel):
-    postdb: list[Timestamp]
-    max_ind: int
-
-    def create_from_file(self):
-        with open('post_db.csv') as f:
-            cols = f.readline().replace('\n', '').split(',')
-            for row in f:
-                row = row.replace('\n', '').split(',')
-                args = dict(zip(cols, row))
-                self.postdb.append(Timestamp(**args))
-                self.max_ind = int(row[0])
-        return None
+    def get_short_url_by_id(self, conn:Connection, url_id:int):
+        stmt = select(urls).filter(urls.c.id == url_id)
+        response = conn.execute(stmt)
+        response = response.fetchall()
+        self.short_url = response[0][1] if response else None
+        return self
     
-    def add_record(self):
-        self.max_ind += 1
-        ts = int(datetime.now().strftime('%s'))
-        self.postdb.append(Timestamp(id=self.max_ind, timestamp=ts))
+    def get_full_url(self, conn:Connection):
+        stmt = select(urls).filter(urls.c.short_url == self.short_url)
+        response = conn.execute(stmt)
+        response = response.fetchall()
+        full_url = response[0][-1] if response else None
+        url = URL(url=full_url)
+        return url
 
-        csv_record = f'\n{self.max_ind},{ts}'
-        with open("post_db.csv", "a") as f:
-            f.write(csv_record)
-        return None
-    
-class DogDB(BaseModel):
-    db: Dict[int, Dog]
-    max_ind: int
+class URL(BaseModel):
+    url:Optional[str] = None
 
-    def create_from_file(self):
-        with open('dogs_db.csv') as f:
-            cols = f.readline().replace('\n', '').split(',')
-            for row in f:
-                row = row.replace('\n', '').split(',')
-                args = dict(zip(cols[1:], row[1:]))
-                self.db[int(row[0])] = Dog(**args)
-                self.max_ind = int(row[0])
-        return None
-    
-    def put_dog(self, dog:Dog):
-        ind = self.max_ind+1
-        dog.pk = ind
-        self.db[ind] = dog
-        self.max_ind = ind
+    def generate_short_id(self, conn:Connection, length:int = 6):
+        characters = string.ascii_letters + string.digits
+        short_url = ''.join(random.choice(characters) for _ in range(length))
+        stmt = select(urls).filter(urls.c.short_url == short_url)
+        response = conn.execute(stmt)
+        response = response.fetchall()
+        return response, short_url
 
-        csv_record = f'\n{dog.pk},{dog.name},{dog.pk},{dog.kind.name}'
-        with open("dogs_db.csv", "a") as f:
-            f.write(csv_record)
-        return dog
-    
-    def patch_dog(self, pk, dog:Dog):
-        dog.pk = pk
-        self.db[pk] = dog
-        csv_path = 'dogs_db.csv'
-
-        csv_record = f'{dog.pk},{dog.name},{dog.pk},{dog.kind.name}\n'
-        with open(csv_path) as f:
-            cols = f.readline().replace('\n', '').split(',')
-            for row in f:
-                if int(row.split(',')[0]) == pk:
-                    break
+    def url_in_db(self, conn:Connection)->Optional[int]:
+        stmt = select(urls).filter(urls.c.url == self.url)
+        response = conn.execute(stmt)
+        response = response.fetchall()
+        url_id = response[0][0] if response else None
         
-        with open(csv_path) as f:
-            filedata = f.read()
+        return url_id
 
-        filedata = filedata.replace(row, csv_record)
+    def create_short_id(self, conn:Connection, length:int = 6)->None:
+        
+        url_id = self.url_in_db(conn)
 
-        with open(csv_path, 'w') as f:
-            f.write(filedata)
-        return dog
+        if isinstance(url_id, int):
+            short_url = ShortURL()
+            short_url.get_short_url_by_id(conn, url_id)
+            return short_url
+
+
+        response, short_url = self.generate_short_id(conn)
+        while response:
+            response, short_url = self.generate_short_id(conn)
+
+        short_url = ShortURL(short_url=short_url)
+        response = conn.execute(text('SELECT max(id) FROM urls'))
+        response = [row[0] for row in response][0]
+        max_ind = 0 if response is None else response+1
+        
+        row = URLInfo(url=self.url, 
+                      short_url=short_url.short_url, 
+                      id=max_ind)
+        stmt = insert(urls).values(row.model_dump())
+        conn.execute(stmt)
+        conn.commit()
+        return short_url
+
+class URLInfo(BaseModel):
+    id:Optional[int] = None
+    url:Optional[str] = None
+    short_url:Optional[str] = None
+
+    def info_by_short(self, short_url:ShortURL, conn:Connection)->None:
+        stmt = select(urls).filter(urls.c.short_url == short_url.short_url)
+        response = conn.execute(stmt)
+        urlinfo = URLInfo(**response.mappings().all()[0]) 
+
+        return urlinfo
 
 if __name__ == "__main__":
-    db = DogDB(db={}, max_ind=0)
-    db.create_from_file()
-    for row in db.db.items():
-        print(row)
-
+    print('OK')
